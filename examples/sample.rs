@@ -55,6 +55,25 @@ fn main() -> Result<()> {
         )))
     })?;
 
+    #[link(name = "dispatch_graphql", kind = "raw-dylib")]
+    extern "C" {
+        fn CreateService(result: *mut *mut c_void) -> HRESULT;
+    }
+
+    unsafe {
+        let mut service = ptr::null_mut();
+        if CreateService(&mut service).is_ok() && !service.is_null() {
+            let service = IDispatch::from_raw(service);
+            let mut host_object = VariantInit();
+            (*host_object.Anonymous.Anonymous).vt = VT_DISPATCH;
+            *(*host_object.Anonymous.Anonymous).Anonymous.pdispVal = Some(service);
+            let _ = webview
+                .webview
+                .AddHostObjectToScript(w!("graphql"), &mut host_object);
+            let _ = mem::take(&mut *(*host_object.Anonymous.Anonymous).Anonymous.pdispVal);
+        }
+    }
+
     // Configure the target URL and add an init script to trigger the calculator callback.
     webview
         .set_title("webview2-com example (crates/webview2-com/examples)")?
@@ -477,25 +496,6 @@ impl WebView {
             }),
             Box::new(|error_code, _id| error_code),
         )?;
-
-        #[link(name = "dispatch_graphql", kind = "raw-dylib")]
-        extern "C" {
-            fn CreateService(result: *mut *mut c_void) -> HRESULT;
-        }
-
-        unsafe {
-            let mut service = ptr::null_mut();
-            if CreateService(&mut service).is_ok() && !service.is_null() {
-                let service = IDispatch::from_raw(service);
-                let mut host_object = VariantInit();
-                (*host_object.Anonymous.Anonymous).vt = VT_DISPATCH;
-                *(*host_object.Anonymous.Anonymous).Anonymous.pdispVal = Some(service);
-                let _ = self
-                    .webview
-                    .AddHostObjectToScript(w!("graphql"), &mut host_object);
-                let _ = mem::take(&mut *(*host_object.Anonymous.Anonymous).Anonymous.pdispVal);
-            }
-        }
 
         Ok(self)
     }
