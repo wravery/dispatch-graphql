@@ -18,13 +18,15 @@ use windows::{
         Foundation::*,
         System::{Com::*, LibraryLoader::*, Ole::*, Variant::*},
         UI::WindowsAndMessaging::{
-            self, CREATESTRUCTW, GWLP_USERDATA, WINDOW_EX_STYLE, WINDOW_STYLE, WNDCLASSEXW,
+            self, PeekMessageA, CREATESTRUCTW, GWLP_USERDATA, MSG, PM_NOREMOVE, WINDOW_EX_STYLE,
+            WINDOW_STYLE, WM_USER, WNDCLASSEXW,
         },
     },
 };
 use windows_implement::implement;
 use windows_interface::interface;
 
+use serde::Serialize;
 use serde_json::Value;
 
 use gqlmapi_rs::*;
@@ -106,99 +108,34 @@ pub unsafe extern "C" fn CreateService(result: *mut *mut c_void) -> HRESULT {
     S_OK
 }
 
-#[interface("E7706FBE-117E-4F1C-AD0F-DC058C6F867B")]
-unsafe trait IResultPayload: IDispatch {
-    fn results(&self, payload: *mut BSTR) -> HRESULT;
-}
-
-#[implement(IResultPayload, IDispatch)]
+#[derive(Serialize)]
 struct ResultPayload {
-    type_lib: UnsafeCell<Option<ITypeLib>>,
     results: Value,
 }
 
-impl_dispatch!(ResultPayload, IResultPayload);
-
-impl IResultPayload_Impl for ResultPayload {
-    unsafe fn results(&self, payload: *mut BSTR) -> HRESULT {
-        let Some(payload) = payload.as_mut() else {
-            return E_INVALIDARG;
-        };
-        let Ok(results) = serde_json::to_string(&self.results) else {
-            return E_UNEXPECTED;
-        };
-        let results: Vec<_> = results
-            .as_str()
-            .encode_utf16()
-            .chain(iter::once(0_u16))
-            .collect();
-        *payload = SysAllocStringLen(Some(&results));
-        S_OK
-    }
-}
-
-#[interface("ABE787E3-CE4E-4B08-9780-E15076CD6045")]
-unsafe trait IPendingPayload: IDispatch {
-    fn pending(&self, key: *mut i32) -> HRESULT;
-}
-
-#[implement(IPendingPayload, IDispatch)]
+#[derive(Serialize)]
 struct PendingPayload {
-    type_lib: UnsafeCell<Option<ITypeLib>>,
     pending: i32,
 }
 
-impl_dispatch!(PendingPayload, IPendingPayload);
-
-impl IPendingPayload_Impl for PendingPayload {
-    unsafe fn pending(&self, key: *mut i32) -> HRESULT {
-        let Some(key) = key.as_mut() else {
-            return E_INVALIDARG;
-        };
-        *key = self.pending;
-        S_OK
-    }
-}
-
-#[interface("A662B860-E098-43D3-A433-BE57DCBC15C3")]
-unsafe trait INextPayload: IDispatch {
-    fn next(&self, payload: *mut BSTR) -> HRESULT;
-    fn subscription(&self, key: *mut i32) -> HRESULT;
-}
-
-#[implement(INextPayload, IDispatch)]
+#[derive(Serialize)]
 struct NextPayload {
-    type_lib: UnsafeCell<Option<ITypeLib>>,
     next: Value,
     subscription: i32,
 }
 
-impl_dispatch!(NextPayload, INextPayload);
-
-impl INextPayload_Impl for NextPayload {
-    unsafe fn next(&self, payload: *mut BSTR) -> HRESULT {
-        let Some(payload) = payload.as_mut() else {
-            return E_INVALIDARG;
-        };
-        let Ok(results) = serde_json::to_string(&self.next) else {
-            return E_UNEXPECTED;
-        };
-        let results: Vec<_> = results
-            .as_str()
-            .encode_utf16()
-            .chain(iter::once(0_u16))
-            .collect();
-        *payload = SysAllocStringLen(Some(&results));
-        S_OK
-    }
-
-    unsafe fn subscription(&self, key: *mut i32) -> HRESULT {
-        let Some(key) = key.as_mut() else {
-            return E_INVALIDARG;
-        };
-        *key = self.subscription;
-        S_OK
-    }
+fn serialize_results<T: Serialize>(payload: T) -> BSTR {
+    serde_json::to_string(&payload)
+        .map_err(|_| ())
+        .and_then(|payload| {
+            let payload: Vec<_> = payload
+                .as_str()
+                .encode_utf16()
+                .chain(iter::once(0_u16))
+                .collect();
+            BSTR::from_wide(&payload).map_err(|_| ())
+        })
+        .unwrap_or_default()
 }
 
 #[interface("FA294686-DB83-4268-A84F-157012D56033")]
@@ -208,8 +145,8 @@ pub unsafe trait IGraphQLService: IDispatch {
         query: BSTR,
         operation_name: BSTR,
         variables: BSTR,
-        next_callback: *mut IDispatch,
-        result: *mut *mut IDispatch,
+        next_callback: *mut c_void,
+        result: *mut BSTR,
     ) -> HRESULT;
     fn unsubscribe(&self, key: i32) -> HRESULT;
 }
@@ -243,17 +180,22 @@ impl IGraphQLService_Impl for GraphQLService {
         query: BSTR,
         operation_name: BSTR,
         variables: BSTR,
-        next_callback: *mut IDispatch,
-        result: *mut *mut IDispatch,
+        next_callback: *mut c_void,
+        result: *mut BSTR,
     ) -> HRESULT {
-        let (Ok(query), Ok(operation_name), Ok(variables), Some(next_callback)) = (
+        let (Ok(query), Ok(operation_name), Ok(variables)) = (
             String::from_utf16(query.as_wide()),
             String::from_utf16(operation_name.as_wide()),
             String::from_utf16(variables.as_wide()),
-            next_callback.as_ref(),
         ) else {
             return E_INVALIDARG;
         };
+        if next_callback.is_null() {
+            return E_INVALIDARG;
+        }
+        let raw = IDispatch::from_raw(next_callback);
+        let next_callback = raw.clone();
+        mem::forget(raw);
         let Ok(parsed_query) = self.gqlmapi.parse_query(&query) else {
             return E_INVALIDARG;
         };
@@ -292,20 +234,14 @@ impl IGraphQLService_Impl for GraphQLService {
                 let Ok(results) = serde_json::from_str(&results) else {
                     return E_UNEXPECTED;
                 };
-                let payload: IResultPayload = ResultPayload {
-                    type_lib: UnsafeCell::new(None),
-                    results,
-                }
-                .into();
-                *result = payload.into_raw() as *mut _;
+                *result = serialize_results(&ResultPayload { results });
                 drop_subscription(key, &subscriptions)
             }
             Err(_) => {
                 let Some(dispatcher) = self.dispatch_queue.get_dispatcher() else {
                     return E_UNEXPECTED;
                 };
-                self.dispatch_queue
-                    .add_subscription(next_callback.clone(), key);
+                self.dispatch_queue.add_subscription(next_callback, key);
                 thread::spawn::<_, HRESULT>(move || {
                     loop {
                         match rx_next.recv() {
@@ -320,15 +256,11 @@ impl IGraphQLService_Impl for GraphQLService {
                             }
                         }
                     }
+                    dispatcher.remove_callback(key);
                     drop_subscription(key, &subscriptions)
                 });
 
-                let payload: IPendingPayload = PendingPayload {
-                    type_lib: UnsafeCell::new(None),
-                    pending: key,
-                }
-                .into();
-                *result = payload.into_raw() as *mut _;
+                *result = serialize_results(&PendingPayload { pending: key });
                 S_OK
             }
         }
@@ -389,6 +321,7 @@ impl Drop for UniqueHwnd {
 
 const CALLBACK_WINDOW_CLASS_NAME: PCWSTR = w!("NextCallback");
 const DISPATCH_CALLBACKS: u32 = WindowsAndMessaging::WM_USER;
+const REMOVE_CALLBACK: u32 = WindowsAndMessaging::WM_USER + 1;
 
 struct DeferCallbackDispatcher {
     window: Weak<UniqueHwnd>,
@@ -412,6 +345,23 @@ impl DeferCallbackDispatcher {
             }
         }
     }
+
+    fn remove_callback(&self, subscription: i32) {
+        if let (Ok(subscription), Some(window)) =
+            (isize::try_from(subscription), self.window.upgrade())
+        {
+            if let Some(window) = window.0 {
+                unsafe {
+                    let _ = WindowsAndMessaging::PostMessageW(
+                        window,
+                        REMOVE_CALLBACK,
+                        WPARAM(0),
+                        LPARAM(subscription as isize),
+                    );
+                }
+            }
+        }
+    }
 }
 
 struct NextCallbacks {
@@ -426,6 +376,8 @@ struct DeferCallbackQueue {
 
 impl DeferCallbackQueue {
     fn new() -> Self {
+        Self::ensure_message_queue();
+
         Self::register_window_class();
 
         let (tx, rx) = mpsc::channel();
@@ -463,6 +415,12 @@ impl DeferCallbackQueue {
                 let _ = callbacks.next_callbacks.insert(subscription, next_callback);
             }
         }
+    }
+
+    fn ensure_message_queue() {
+        let mut msg = MSG::default();
+        let hwnd = HWND::default();
+        unsafe { PeekMessageA(&mut msg, hwnd, WM_USER, WM_USER, PM_NOREMOVE) };
     }
 
     fn get_dispatcher(&self) -> Option<DeferCallbackDispatcher> {
@@ -517,18 +475,11 @@ impl DeferCallbackQueue {
                 if !callbacks.is_null() {
                     let callbacks = Box::leak(Box::from_raw(callbacks));
                     while let Ok((next, subscription)) = callbacks.rx.try_recv() {
-                        let payload: INextPayload = NextPayload {
-                            type_lib: UnsafeCell::new(None),
-                            next,
-                            subscription,
-                        }
-                        .into();
-                        if let (Some(next_callback), Ok(payload)) =
-                            (callbacks.next_callbacks.get(&subscription), payload.cast())
-                        {
+                        let payload = serialize_results(&NextPayload { next, subscription });
+                        if let Some(next_callback) = callbacks.next_callbacks.get(&subscription) {
                             let mut rgvarg = [VariantInit(); 1];
-                            (*rgvarg[0].Anonymous.Anonymous).vt = VT_DISPATCH;
-                            *(*rgvarg[0].Anonymous.Anonymous).Anonymous.pdispVal = Some(payload);
+                            (*rgvarg[0].Anonymous.Anonymous).vt = VT_BSTR;
+                            *(*rgvarg[0].Anonymous.Anonymous).Anonymous.bstrVal = payload;
                             let params = DISPPARAMS {
                                 rgvarg: rgvarg.as_mut_ptr(),
                                 cArgs: 1,
@@ -544,10 +495,21 @@ impl DeferCallbackQueue {
                                 None,
                                 None,
                             );
-                            let _ = mem::take(
-                                &mut *(*rgvarg[0].Anonymous.Anonymous).Anonymous.pdispVal,
-                            );
+                            let _ =
+                                mem::take(&mut *(*rgvarg[0].Anonymous.Anonymous).Anonymous.bstrVal);
                         }
+                    }
+                }
+                LRESULT(0)
+            }
+
+            REMOVE_CALLBACK => {
+                if let Ok(key) = i32::try_from(lparam.0) {
+                    let callbacks: *mut NextCallbacks =
+                        WindowsAndMessaging::GetWindowLongPtrW(window, GWLP_USERDATA) as *mut _;
+                    if !callbacks.is_null() {
+                        let callbacks = Box::leak(Box::from_raw(callbacks));
+                        callbacks.next_callbacks.remove(&key);
                     }
                 }
                 LRESULT(0)
