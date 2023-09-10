@@ -30,7 +30,7 @@ fn main() -> io::Result<()> {
     let rc_path = rc_path.as_path().to_str().unwrap();
     let mut rc_file = File::create(rc_path)?;
     rc_file.write_all(
-        b"typelib GraphQLService.tlb
+        b"1 typelib GraphQLService.tlb
 ",
     )?;
 
