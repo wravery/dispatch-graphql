@@ -80,7 +80,7 @@ macro_rules! impl_dispatch {
             ) -> windows::core::Result<()> {
                 let type_info = self.GetTypeInfo(0, lcid)?;
                 unsafe {
-                    let this: IGraphQLService = self.cast()?;
+                    let this: $interface = self.cast()?;
                     type_info.Invoke(
                         this.as_raw(),
                         dispidmember,
@@ -297,7 +297,7 @@ impl IGraphQLService_Impl for GraphQLService {
                     results,
                 }
                 .into();
-                *result = payload.as_raw() as *mut _;
+                *result = payload.into_raw() as *mut _;
                 drop_subscription(key, &subscriptions)
             }
             Err(_) => {
@@ -328,7 +328,7 @@ impl IGraphQLService_Impl for GraphQLService {
                     pending: key,
                 }
                 .into();
-                *result = payload.as_raw() as *mut _;
+                *result = payload.into_raw() as *mut _;
                 S_OK
             }
         }
