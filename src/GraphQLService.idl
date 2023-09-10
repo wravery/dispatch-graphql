@@ -1,0 +1,60 @@
+import "oaidl.idl";
+
+[uuid(AFF672AB-872C-402E-9152-E809ADC25CC7)]
+library GraphQLService {
+    importlib("stdole2.tlb");
+
+    [
+        object,
+        nonextensible,
+        local,
+        pointer_default(unique),
+        uuid(E7706FBE-117E-4F1C-AD0F-DC058C6F867B),
+        version(1.0),
+        dual
+    ]
+    interface IResultPayload : IDispatch {
+        [id(1), propget] HRESULT results([out, retval] BSTR* payload);
+    };
+
+    [
+        object,
+        nonextensible,
+        local,
+        pointer_default(unique),
+        uuid(ABE787E3-CE4E-4B08-9780-E15076CD6045),
+        version(1.0),
+        dual
+    ]
+    interface IPendingPayload : IDispatch {
+        [id(1), propget] HRESULT pending([out, retval] INT* key);
+    };
+
+    [
+        object,
+        nonextensible,
+        local,
+        pointer_default(unique),
+        uuid(A662B860-E098-43D3-A433-BE57DCBC15C3),
+        version(1.0),
+        dual
+    ]
+    interface INextPayload : IDispatch {
+        [id(1), propget] HRESULT next([out, retval] BSTR* payload);
+        [id(2), propget] HRESULT subscription([out, retval] INT* key);
+    };
+
+    [
+        object,
+        nonextensible,
+        local,
+        pointer_default(unique),
+        uuid(FA294686-DB83-4268-A84F-157012D56033),
+        version(1.0),
+        dual
+    ]
+    interface IGraphQLService : IDispatch {
+        [id(1)] HRESULT fetchQuery([in] BSTR query, [in] BSTR operationName, [in] BSTR variables, [in] IDispatch* nextCallback, [out, retval] IDispatch** result);
+        [id(2)] HRESULT unsubscribe([in] INT key);
+    };
+}
