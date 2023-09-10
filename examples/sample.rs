@@ -7,6 +7,7 @@ extern crate windows;
 
 use std::{
     collections::HashMap,
+    ffi::c_void,
     fmt, mem, ptr,
     sync::{mpsc, Arc, Mutex},
 };
@@ -18,7 +19,7 @@ use windows::{
     Win32::{
         Foundation::{E_POINTER, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM},
         Graphics::Gdi,
-        System::{Com::*, LibraryLoader, Threading, WinRT::EventRegistrationToken},
+        System::{Com::*, LibraryLoader, Threading, Variant::*, WinRT::EventRegistrationToken},
         UI::{
             HiDpi,
             Input::KeyboardAndMouse,
@@ -257,7 +258,8 @@ impl WebView {
         let size = get_window_size(parent);
         let mut client_rect = RECT::default();
         unsafe {
-            let _ = WindowsAndMessaging::GetClientRect(parent, std::mem::transmute(&mut client_rect));
+            let _ =
+                WindowsAndMessaging::GetClientRect(parent, std::mem::transmute(&mut client_rect));
             controller.SetBounds(RECT {
                 left: 0,
                 top: 0,
@@ -416,7 +418,8 @@ impl WebView {
         if let Some(frame) = self.frame.as_ref() {
             let title = CoTaskMemPWSTR::from(title);
             unsafe {
-                let _ = WindowsAndMessaging::SetWindowTextW(*frame.window, *title.as_ref().as_pcwstr());
+                let _ =
+                    WindowsAndMessaging::SetWindowTextW(*frame.window, *title.as_ref().as_pcwstr());
             }
         }
         Ok(self)
@@ -474,6 +477,26 @@ impl WebView {
             }),
             Box::new(|error_code, _id| error_code),
         )?;
+
+        #[link(name = "dispatch_graphql", kind = "raw-dylib")]
+        extern "C" {
+            fn CreateService(result: *mut *mut c_void) -> HRESULT;
+        }
+
+        unsafe {
+            let mut service = ptr::null_mut();
+            if CreateService(&mut service).is_ok() && !service.is_null() {
+                let service = IDispatch::from_raw(service);
+                let mut host_object = VariantInit();
+                (*host_object.Anonymous.Anonymous).vt = VT_DISPATCH;
+                *(*host_object.Anonymous.Anonymous).Anonymous.pdispVal = Some(service);
+                let _ = self
+                    .webview
+                    .AddHostObjectToScript(w!("graphql"), &mut host_object);
+                let _ = mem::take(&mut *(*host_object.Anonymous.Anonymous).Anonymous.pdispVal);
+            }
+        }
+
         Ok(self)
     }
 
@@ -650,7 +673,8 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, w_param: WPARAM, l_param: L
 
 fn get_window_size(hwnd: HWND) -> SIZE {
     let mut client_rect = RECT::default();
-    let _ = unsafe { WindowsAndMessaging::GetClientRect(hwnd, std::mem::transmute(&mut client_rect)) };
+    let _ =
+        unsafe { WindowsAndMessaging::GetClientRect(hwnd, std::mem::transmute(&mut client_rect)) };
     SIZE {
         cx: client_rect.right - client_rect.left,
         cy: client_rect.bottom - client_rect.top,

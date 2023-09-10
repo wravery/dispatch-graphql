@@ -3,6 +3,7 @@
 use std::{
     cell::UnsafeCell,
     collections::BTreeMap,
+    ffi::c_void,
     iter, mem,
     sync::{
         atomic::{AtomicI32, Ordering},
@@ -95,12 +96,22 @@ macro_rules! impl_dispatch {
     };
 }
 
+#[no_mangle]
+pub unsafe extern "C" fn CreateService(result: *mut *mut c_void) -> HRESULT {
+    let service: IGraphQLService = GraphQLService::new().into();
+    let Ok(service) = service.cast::<IDispatch>() else {
+        return E_NOINTERFACE;
+    };
+    *result = service.into_raw();
+    S_OK
+}
+
 #[interface("E7706FBE-117E-4F1C-AD0F-DC058C6F867B")]
 unsafe trait IResultPayload: IDispatch {
     fn results(&self, payload: *mut BSTR) -> HRESULT;
 }
 
-#[implement(IResultPayload)]
+#[implement(IResultPayload, IDispatch)]
 struct ResultPayload {
     type_lib: UnsafeCell<Option<ITypeLib>>,
     results: Value,
@@ -131,7 +142,7 @@ unsafe trait IPendingPayload: IDispatch {
     fn pending(&self, key: *mut i32) -> HRESULT;
 }
 
-#[implement(IPendingPayload)]
+#[implement(IPendingPayload, IDispatch)]
 struct PendingPayload {
     type_lib: UnsafeCell<Option<ITypeLib>>,
     pending: i32,
@@ -155,7 +166,7 @@ unsafe trait INextPayload: IDispatch {
     fn subscription(&self, key: *mut i32) -> HRESULT;
 }
 
-#[implement(INextPayload)]
+#[implement(INextPayload, IDispatch)]
 struct NextPayload {
     type_lib: UnsafeCell<Option<ITypeLib>>,
     next: Value,
@@ -191,7 +202,7 @@ impl INextPayload_Impl for NextPayload {
 }
 
 #[interface("FA294686-DB83-4268-A84F-157012D56033")]
-unsafe trait IGraphQLService: IDispatch {
+pub unsafe trait IGraphQLService: IDispatch {
     fn fetchQuery(
         &self,
         query: BSTR,
@@ -203,7 +214,7 @@ unsafe trait IGraphQLService: IDispatch {
     fn unsubscribe(&self, key: i32) -> HRESULT;
 }
 
-#[implement(IGraphQLService)]
+#[implement(IGraphQLService, IDispatch)]
 pub struct GraphQLService {
     type_lib: UnsafeCell<Option<ITypeLib>>,
     gqlmapi: MAPIGraphQL,
@@ -331,7 +342,7 @@ impl IGraphQLService_Impl for GraphQLService {
 unsafe fn load_type_lib() -> windows::core::Result<ITypeLib> {
     let mut buffer: mem::MaybeUninit<[u16; MAX_PATH as usize]> = mem::MaybeUninit::uninit();
     let count =
-        GetModuleFileNameW(GetModuleHandleW(PCWSTR::null())?, &mut *buffer.as_mut_ptr()) as usize;
+        GetModuleFileNameW(get_module_handle(), &mut *buffer.as_mut_ptr()) as usize;
     let buffer = buffer.assume_init();
     if count >= buffer.len() {
         return Err(ERROR_INSUFFICIENT_BUFFER.into());
@@ -339,7 +350,7 @@ unsafe fn load_type_lib() -> windows::core::Result<ITypeLib> {
     let Ok(file_name) = String::from_utf16(&buffer[0..count]) else {
         return Err(E_UNEXPECTED.into());
     };
-    let resource_name: Vec<_> = format!("{file_name}\\1")
+    let resource_name: Vec<_> = file_name
         .as_str()
         .encode_utf16()
         .chain(iter::once(0_u16))
