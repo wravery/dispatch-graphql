@@ -341,8 +341,7 @@ impl IGraphQLService_Impl for GraphQLService {
 
 unsafe fn load_type_lib() -> windows::core::Result<ITypeLib> {
     let mut buffer: mem::MaybeUninit<[u16; MAX_PATH as usize]> = mem::MaybeUninit::uninit();
-    let count =
-        GetModuleFileNameW(get_module_handle(), &mut *buffer.as_mut_ptr()) as usize;
+    let count = GetModuleFileNameW(get_module_handle(), &mut *buffer.as_mut_ptr()) as usize;
     let buffer = buffer.assume_init();
     if count >= buffer.len() {
         return Err(ERROR_INSUFFICIENT_BUFFER.into());
@@ -350,7 +349,7 @@ unsafe fn load_type_lib() -> windows::core::Result<ITypeLib> {
     let Ok(file_name) = String::from_utf16(&buffer[0..count]) else {
         return Err(E_UNEXPECTED.into());
     };
-    let resource_name: Vec<_> = file_name
+    let resource_name: Vec<_> = format!("{file_name}\\1")
         .as_str()
         .encode_utf16()
         .chain(iter::once(0_u16))
