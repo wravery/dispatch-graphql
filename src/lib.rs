@@ -18,7 +18,7 @@ use windows::{
         Foundation::*,
         System::{Com::*, LibraryLoader::*, Ole::*, Variant::*},
         UI::WindowsAndMessaging::{
-            self, PeekMessageA, CREATESTRUCTW, GWLP_USERDATA, MSG, PM_NOREMOVE, WINDOW_EX_STYLE,
+            self, PeekMessageW, CREATESTRUCTW, GWLP_USERDATA, MSG, PM_NOREMOVE, WINDOW_EX_STYLE,
             WINDOW_STYLE, WM_USER, WNDCLASSEXW,
         },
     },
@@ -420,7 +420,7 @@ impl DeferCallbackQueue {
     fn ensure_message_queue() {
         let mut msg = MSG::default();
         let hwnd = HWND::default();
-        unsafe { PeekMessageA(&mut msg, hwnd, WM_USER, WM_USER, PM_NOREMOVE) };
+        unsafe { PeekMessageW(&mut msg, hwnd, WM_USER, WM_USER, PM_NOREMOVE) };
     }
 
     fn get_dispatcher(&self) -> Option<DeferCallbackDispatcher> {
@@ -485,10 +485,11 @@ impl DeferCallbackQueue {
                                 cArgs: 1,
                                 ..Default::default()
                             };
+                            const LOCALE_USER_DEFAULT: u32 = 0x400;
                             let _ = next_callback.Invoke(
                                 DISPID_UNKNOWN,
                                 &GUID::default(),
-                                0,
+                                LOCALE_USER_DEFAULT,
                                 DISPATCH_METHOD,
                                 &params as *const _,
                                 None,
