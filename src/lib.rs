@@ -496,8 +496,7 @@ impl DeferCallbackQueue {
                                 None,
                                 None,
                             );
-                            let _ =
-                                mem::take(&mut *(*rgvarg[0].Anonymous.Anonymous).Anonymous.bstrVal);
+                            ClearVariantArray(&mut rgvarg);
                         }
                     }
                 }

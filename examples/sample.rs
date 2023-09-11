@@ -70,7 +70,7 @@ fn main() -> Result<()> {
             let _ = webview
                 .webview
                 .AddHostObjectToScript(w!("graphql"), &mut host_object);
-            let _ = mem::take(&mut *(*host_object.Anonymous.Anonymous).Anonymous.pdispVal);
+            let _ = VariantClear(&mut host_object);
         }
     }
 
