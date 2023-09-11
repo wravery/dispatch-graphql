@@ -1,19 +1,14 @@
 #![windows_subsystem = "windows"]
 
-extern crate serde;
-extern crate serde_json;
 extern crate webview2_com;
 extern crate windows;
 
 use std::{
-    collections::HashMap,
     ffi::c_void,
     fmt, mem, ptr,
     sync::{mpsc, Arc, Mutex},
 };
 
-use serde::Deserialize;
-use serde_json::{Number, Value};
 use windows::{
     core::*,
     Win32::{
@@ -38,23 +33,6 @@ fn main() -> Result<()> {
 
     let webview = WebView::create(None, true)?;
 
-    // Bind a quick and dirty calculator callback.
-    webview.bind("hostCallback", move |request| {
-        if let [Value::String(str), Value::Number(a), Value::Number(b)] = &request[..] {
-            if str == "Add" {
-                let result = a.as_f64().unwrap_or(0f64) + b.as_f64().unwrap_or(0f64);
-                let result = Number::from_f64(result);
-                if let Some(result) = result {
-                    return Ok(Value::Number(result));
-                }
-            }
-        }
-
-        Err(Error::WebView2Error(webview2_com::Error::CallbackError(
-            String::from(r#"Usage: window.hostCallback("Add", a, b)"#),
-        )))
-    })?;
-
     #[link(name = "dispatch_graphql", kind = "raw-dylib")]
     extern "C" {
         fn CreateService(result: *mut *mut c_void) -> HRESULT;
@@ -74,13 +52,11 @@ fn main() -> Result<()> {
         }
     }
 
-    // Configure the target URL and add an init script to trigger the calculator callback.
+    // Configure the target URL and add an init script to output the default store and inbox IDs.
     webview
         .set_title("webview2-com example (crates/webview2-com/examples)")?
-        .init(
-            r#"window.hostCallback("Add", 2, 6).then(result => console.log(`Result: ${result}`));"#,
-        )?
-        .navigate("https://github.com/wravery/webview2-rs")?;
+        .init(include_str!("sample.js"))?
+        .navigate("https://github.com/wravery/dispatch-graphql")?;
 
     // Off we go....
     webview.run()
@@ -90,7 +66,6 @@ fn main() -> Result<()> {
 pub enum Error {
     WebView2Error(webview2_com::Error),
     WindowsError(windows::core::Error),
-    JsonError(serde_json::Error),
     LockError,
 }
 
@@ -115,12 +90,6 @@ impl From<windows::core::Error> for Error {
 impl From<HRESULT> for Error {
     fn from(err: HRESULT) -> Self {
         Self::WindowsError(windows::core::Error::from(err))
-    }
-}
-
-impl From<serde_json::Error> for Error {
-    fn from(err: serde_json::Error) -> Self {
-        Self::JsonError(err)
     }
 }
 
@@ -194,8 +163,6 @@ struct WebViewController(ICoreWebView2Controller);
 
 type WebViewSender = mpsc::Sender<Box<dyn FnOnce(WebView) + Send>>;
 type WebViewReceiver = mpsc::Receiver<Box<dyn FnOnce(WebView) + Send>>;
-type BindingCallback = Box<dyn FnMut(Vec<Value>) -> Result<Value>>;
-type BindingsMap = HashMap<String, BindingCallback>;
 
 #[derive(Clone)]
 pub struct WebView {
@@ -204,7 +171,6 @@ pub struct WebView {
     tx: WebViewSender,
     rx: Arc<WebViewReceiver>,
     thread_id: u32,
-    bindings: Arc<Mutex<BindingsMap>>,
     frame: Option<FrameWindow>,
     parent: Arc<HWND>,
     url: Arc<Mutex<String>>,
@@ -214,13 +180,6 @@ impl Drop for WebViewController {
     fn drop(&mut self) {
         unsafe { self.0.Close() }.unwrap();
     }
-}
-
-#[derive(Debug, Deserialize)]
-struct InvokeMessage {
-    id: u64,
-    method: String,
-    params: Vec<Value>,
 }
 
 impl WebView {
@@ -312,50 +271,10 @@ impl WebView {
             tx,
             rx,
             thread_id,
-            bindings: Arc::new(Mutex::new(HashMap::new())),
             frame,
             parent: Arc::new(parent),
             url: Arc::new(Mutex::new(String::new())),
         };
-
-        // Inject the invoke handler.
-        webview
-            .init(r#"window.external = { invoke: s => window.chrome.webview.postMessage(s) };"#)?;
-
-        let bindings = webview.bindings.clone();
-        let bound = webview.clone();
-        unsafe {
-            let mut _token = EventRegistrationToken::default();
-            webview.webview.add_WebMessageReceived(
-                &WebMessageReceivedEventHandler::create(Box::new(move |_webview, args| {
-                    if let Some(args) = args {
-                        let mut message = PWSTR(ptr::null_mut());
-                        if args.WebMessageAsJson(&mut message).is_ok() {
-                            let message = CoTaskMemPWSTR::from(message);
-                            if let Ok(value) =
-                                serde_json::from_str::<InvokeMessage>(&message.to_string())
-                            {
-                                if let Ok(mut bindings) = bindings.try_lock() {
-                                    if let Some(f) = bindings.get_mut(&value.method) {
-                                        match (*f)(value.params) {
-                                            Ok(result) => bound.resolve(value.id, 0, result),
-                                            Err(err) => bound.resolve(
-                                                value.id,
-                                                1,
-                                                Value::String(format!("{err:#?}")),
-                                            ),
-                                        }
-                                        .unwrap();
-                                    }
-                                }
-                            }
-                        }
-                    }
-                    Ok(())
-                })),
-                &mut _token,
-            )?;
-        }
 
         if webview.frame.is_some() {
             WebView::set_window_webview(parent, Some(Box::new(webview.clone())));
@@ -530,59 +449,6 @@ impl WebView {
             );
         }
         Ok(self)
-    }
-
-    pub fn bind<F>(&self, name: &str, f: F) -> Result<&Self>
-    where
-        F: FnMut(Vec<Value>) -> Result<Value> + 'static,
-    {
-        self.bindings
-            .lock()?
-            .insert(String::from(name), Box::new(f));
-
-        let js = String::from(
-            r#"
-            (function() {
-                var name = '"#,
-        ) + name
-            + r#"';
-                var RPC = window._rpc = (window._rpc || {nextSeq: 1});
-                window[name] = function() {
-                    var seq = RPC.nextSeq++;
-                    var promise = new Promise(function(resolve, reject) {
-                        RPC[seq] = {
-                            resolve: resolve,
-                            reject: reject,
-                        };
-                    });
-                    window.external.invoke({
-                        id: seq,
-                        method: name,
-                        params: Array.prototype.slice.call(arguments),
-                    });
-                    return promise;
-                }
-            })()"#;
-
-        self.init(&js)
-    }
-
-    pub fn resolve(&self, id: u64, status: i32, result: Value) -> Result<&Self> {
-        let result = result.to_string();
-
-        self.dispatch(move |webview| {
-            let method = match status {
-                0 => "resolve",
-                _ => "reject",
-            };
-            let js = format!(
-                r#"
-                window._rpc[{id}].{method}({result});
-                window._rpc[{id}] = undefined;"#
-            );
-
-            webview.eval(&js).expect("eval return script");
-        })
     }
 
     fn set_window_webview(hwnd: HWND, webview: Option<Box<WebView>>) -> Option<Box<WebView>> {
