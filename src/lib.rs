@@ -300,10 +300,11 @@ fn drop_subscription(
     S_OK
 }
 
-const MODULE_NAME: PCWSTR = w!(r#"dispatch_graphql.dll"#);
+const MODULE_NAME: PCSTR =
+    PCSTR::from_raw(concat!(env!("CARGO_CRATE_NAME"), ".dll", '\0').as_ptr());
 
 fn get_module_handle() -> HMODULE {
-    unsafe { GetModuleHandleW(MODULE_NAME) }.unwrap_or_default()
+    unsafe { GetModuleHandleA(MODULE_NAME) }.unwrap_or_default()
 }
 
 #[derive(Default)]
