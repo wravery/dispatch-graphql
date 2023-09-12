@@ -33,6 +33,7 @@ use gqlmapi_rs::*;
 
 macro_rules! impl_dispatch {
     ($type:ident, $interface:ident) => {
+        #[allow(clippy::not_unsafe_ptr_arg_deref)]
         impl IDispatch_Impl for $type {
             fn GetTypeInfoCount(&self) -> windows::core::Result<u32> {
                 Ok(1)
@@ -98,8 +99,23 @@ macro_rules! impl_dispatch {
     };
 }
 
+/// External entry point to create an IDispatch object for the service. If this function succeeds,
+/// the caller is responsible for calling `Release` on the `IDispatch` interface pointer returned
+/// through the `result` out-param. The initial value that `result` points to must be `null`.
+///
+/// # Safety
+///
+/// The `result` parameter must be a valid pointer.
 #[no_mangle]
 pub unsafe extern "C" fn CreateService(result: *mut *mut c_void) -> HRESULT {
+    // Parameter validation
+    let Some(result) = result.as_mut() else {
+        return E_POINTER;
+    };
+    if !result.is_null() {
+        return E_INVALIDARG;
+    }
+
     let service: IGraphQLService = GraphQLService::new().into();
     let Ok(service) = service.cast::<IDispatch>() else {
         return E_NOINTERFACE;
@@ -169,6 +185,12 @@ impl GraphQLService {
             subscriptions: Arc::new(Mutex::new(BTreeMap::new())),
             dispatch_queue: DeferCallbackQueue::new(),
         }
+    }
+}
+
+impl Default for GraphQLService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -243,24 +265,17 @@ impl IGraphQLService_Impl for GraphQLService {
                 };
                 self.dispatch_queue.add_subscription(next_callback, key);
                 thread::spawn::<_, HRESULT>(move || {
-                    loop {
-                        match rx_next.recv() {
-                            Ok(next) => {
-                                let Ok(next) = serde_json::from_str(&next) else {
-                                    return E_UNEXPECTED;
-                                };
-                                dispatcher.dispatch(next, key);
-                            }
-                            Err(_) => {
-                                break;
-                            }
-                        }
+                    while let Ok(next) = rx_next.recv() {
+                        let Ok(next) = serde_json::from_str(&next) else {
+                            return E_UNEXPECTED;
+                        };
+                        dispatcher.dispatch(next, key);
                     }
                     dispatcher.remove_callback(key);
                     drop_subscription(key, &subscriptions)
                 });
 
-                *result = serialize_results(&PendingPayload { pending: key });
+                *result = serialize_results(PendingPayload { pending: key });
                 S_OK
             }
         }
@@ -357,7 +372,7 @@ impl DeferCallbackDispatcher {
                         window,
                         REMOVE_CALLBACK,
                         WPARAM(0),
-                        LPARAM(subscription as isize),
+                        LPARAM(subscription),
                     );
                 }
             }
@@ -479,8 +494,11 @@ impl DeferCallbackQueue {
                         let payload = serialize_results(&NextPayload { next, subscription });
                         if let Some(next_callback) = callbacks.next_callbacks.get(&subscription) {
                             let mut rgvarg = [VariantInit(); 1];
-                            (*rgvarg[0].Anonymous.Anonymous).vt = VT_BSTR;
-                            *(*rgvarg[0].Anonymous.Anonymous).Anonymous.bstrVal = payload;
+                            #[allow(clippy::explicit_auto_deref)]
+                            {
+                                (*rgvarg[0].Anonymous.Anonymous).vt = VT_BSTR;
+                                *(*rgvarg[0].Anonymous.Anonymous).Anonymous.bstrVal = payload;
+                            }
                             let params = DISPPARAMS {
                                 rgvarg: rgvarg.as_mut_ptr(),
                                 cArgs: 1,
