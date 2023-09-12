@@ -3,11 +3,7 @@
 extern crate webview2_com;
 extern crate windows;
 
-use std::{
-    ffi::c_void,
-    fmt, mem, ptr,
-    sync::{mpsc, Arc, Mutex},
-};
+use std::{ffi::c_void, fmt, mem, ptr, rc::Rc, sync::mpsc};
 
 use windows::{
     core::*,
@@ -31,7 +27,7 @@ fn main() -> Result<()> {
     }
     set_process_dpi_awareness()?;
 
-    let webview = WebView::create(None, true)?;
+    let mut webview = WebView::create(None, true)?;
 
     #[link(name = "dispatch_graphql", kind = "raw-dylib")]
     extern "C" {
@@ -43,8 +39,11 @@ fn main() -> Result<()> {
         if CreateService(&mut service).is_ok() && !service.is_null() {
             let service = IDispatch::from_raw(service);
             let mut host_object = VariantInit();
-            (*host_object.Anonymous.Anonymous).vt = VT_DISPATCH;
-            *(*host_object.Anonymous.Anonymous).Anonymous.pdispVal = Some(service);
+            #[allow(clippy::explicit_auto_deref)]
+            {
+                (*host_object.Anonymous.Anonymous).vt = VT_DISPATCH;
+                *(*host_object.Anonymous.Anonymous).Anonymous.pdispVal = Some(service);
+            }
             let _ = webview
                 .webview
                 .AddHostObjectToScript(w!("graphql"), &mut host_object);
@@ -119,8 +118,8 @@ impl Drop for Window {
 
 #[derive(Clone)]
 pub struct FrameWindow {
-    window: Arc<HWND>,
-    size: Arc<Mutex<SIZE>>,
+    window: HWND,
+    size: SIZE,
 }
 
 impl FrameWindow {
@@ -153,8 +152,8 @@ impl FrameWindow {
         };
 
         FrameWindow {
-            window: Arc::new(hwnd),
-            size: Arc::new(Mutex::new(SIZE { cx: 0, cy: 0 })),
+            window: hwnd,
+            size: SIZE { cx: 0, cy: 0 },
         }
     }
 }
@@ -166,14 +165,14 @@ type WebViewReceiver = mpsc::Receiver<Box<dyn FnOnce(WebView) + Send>>;
 
 #[derive(Clone)]
 pub struct WebView {
-    controller: Arc<WebViewController>,
-    webview: Arc<ICoreWebView2>,
+    controller: Rc<WebViewController>,
+    webview: Rc<ICoreWebView2>,
     tx: WebViewSender,
-    rx: Arc<WebViewReceiver>,
+    rx: Rc<WebViewReceiver>,
     thread_id: u32,
     frame: Option<FrameWindow>,
-    parent: Arc<HWND>,
-    url: Arc<Mutex<String>>,
+    parent: HWND,
+    url: String,
 }
 
 impl Drop for WebViewController {
@@ -184,11 +183,11 @@ impl Drop for WebViewController {
 
 impl WebView {
     pub fn create(parent: Option<HWND>, debug: bool) -> Result<WebView> {
-        let (parent, frame) = match parent {
+        let (parent, mut frame) = match parent {
             Some(hwnd) => (hwnd, None),
             None => {
                 let frame = FrameWindow::new();
-                (*frame.window, Some(frame))
+                (frame.window, Some(frame))
             }
         };
 
@@ -236,8 +235,7 @@ impl WebView {
         let size = get_window_size(parent);
         let mut client_rect = RECT::default();
         unsafe {
-            let _ =
-                WindowsAndMessaging::GetClientRect(parent, std::mem::transmute(&mut client_rect));
+            let _ = WindowsAndMessaging::GetClientRect(parent, &mut client_rect as *mut _);
             controller.SetBounds(RECT {
                 left: 0,
                 top: 0,
@@ -257,23 +255,23 @@ impl WebView {
             }
         }
 
-        if let Some(frame) = frame.as_ref() {
-            *frame.size.lock()? = size;
+        if let Some(frame) = frame.as_mut() {
+            frame.size = size;
         }
 
         let (tx, rx) = mpsc::channel();
-        let rx = Arc::new(rx);
+        let rx = Rc::new(rx);
         let thread_id = unsafe { Threading::GetCurrentThreadId() };
 
         let webview = WebView {
-            controller: Arc::new(WebViewController(controller)),
-            webview: Arc::new(webview),
+            controller: Rc::new(WebViewController(controller)),
+            webview: Rc::new(webview),
             tx,
             rx,
             thread_id,
             frame,
-            parent: Arc::new(parent),
-            url: Arc::new(Mutex::new(String::new())),
+            parent,
+            url: String::new(),
         };
 
         if webview.frame.is_some() {
@@ -285,7 +283,7 @@ impl WebView {
 
     pub fn run(self) -> Result<()> {
         let webview = self.webview.as_ref();
-        let url = self.url.try_lock()?.clone();
+        let url = self.url.clone();
         let (tx, rx) = mpsc::channel();
 
         if !url.is_empty() {
@@ -306,7 +304,7 @@ impl WebView {
         }
 
         if let Some(frame) = self.frame.as_ref() {
-            let hwnd = *frame.window;
+            let hwnd = frame.window;
             unsafe {
                 WindowsAndMessaging::ShowWindow(hwnd, WindowsAndMessaging::SW_SHOW);
                 Gdi::UpdateWindow(hwnd);
@@ -352,20 +350,20 @@ impl WebView {
         Ok(())
     }
 
-    pub fn set_title(&self, title: &str) -> Result<&Self> {
+    pub fn set_title(&mut self, title: &str) -> Result<&mut Self> {
         if let Some(frame) = self.frame.as_ref() {
             let title = CoTaskMemPWSTR::from(title);
             unsafe {
                 let _ =
-                    WindowsAndMessaging::SetWindowTextW(*frame.window, *title.as_ref().as_pcwstr());
+                    WindowsAndMessaging::SetWindowTextW(frame.window, *title.as_ref().as_pcwstr());
             }
         }
         Ok(self)
     }
 
-    pub fn set_size(&self, width: i32, height: i32) -> Result<&Self> {
-        if let Some(frame) = self.frame.as_ref() {
-            *frame.size.lock().expect("lock size") = SIZE {
+    pub fn set_size(&mut self, width: i32, height: i32) -> Result<&mut Self> {
+        if let Some(frame) = self.frame.as_mut() {
+            frame.size = SIZE {
                 cx: width,
                 cy: height,
             };
@@ -378,7 +376,7 @@ impl WebView {
                 })?;
 
                 let _ = WindowsAndMessaging::SetWindowPos(
-                    *frame.window,
+                    frame.window,
                     None,
                     0,
                     0,
@@ -394,16 +392,15 @@ impl WebView {
     }
 
     pub fn get_window(&self) -> HWND {
-        *self.parent
+        self.parent
     }
 
-    pub fn navigate(&self, url: &str) -> Result<&Self> {
-        let url = url.into();
-        *self.url.lock().expect("lock url") = url;
+    pub fn navigate(&mut self, url: &str) -> Result<&mut Self> {
+        self.url = url.into();
         Ok(self)
     }
 
-    pub fn init(&self, js: &str) -> Result<&Self> {
+    pub fn init(&mut self, js: &str) -> Result<&mut Self> {
         let webview = self.webview.clone();
         let js = String::from(js);
         AddScriptToExecuteOnDocumentCreatedCompletedHandler::wait_for_async_operation(
@@ -492,14 +489,14 @@ fn set_process_dpi_awareness() -> Result<()> {
 }
 
 extern "system" fn window_proc(hwnd: HWND, msg: u32, w_param: WPARAM, l_param: LPARAM) -> LRESULT {
-    let webview = match WebView::get_window_webview(hwnd) {
+    let mut webview = match WebView::get_window_webview(hwnd) {
         Some(webview) => webview,
         None => return unsafe { WindowsAndMessaging::DefWindowProcW(hwnd, msg, w_param, l_param) },
     };
 
     let frame = webview
         .frame
-        .as_ref()
+        .as_mut()
         .expect("should only be called for owned windows");
 
     match msg {
@@ -517,7 +514,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, w_param: WPARAM, l_param: L
                     })
                     .unwrap();
             }
-            *frame.size.lock().expect("lock size") = size;
+            frame.size = size;
             LRESULT::default()
         }
 
@@ -539,8 +536,7 @@ extern "system" fn window_proc(hwnd: HWND, msg: u32, w_param: WPARAM, l_param: L
 
 fn get_window_size(hwnd: HWND) -> SIZE {
     let mut client_rect = RECT::default();
-    let _ =
-        unsafe { WindowsAndMessaging::GetClientRect(hwnd, std::mem::transmute(&mut client_rect)) };
+    let _ = unsafe { WindowsAndMessaging::GetClientRect(hwnd, &mut client_rect as *mut _) };
     SIZE {
         cx: client_rect.right - client_rect.left,
         cy: client_rect.bottom - client_rect.top,
