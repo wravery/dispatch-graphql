@@ -205,6 +205,13 @@ impl IGraphQLService_Impl for GraphQLService {
         next_callback: *mut c_void,
         result: *mut BSTR,
     ) -> HRESULT {
+        // The caller (WebView2) retains ownership of these BSTRs, so suppress the drop destructor
+        // on the windows::core::BSTR arguments constructed by the generated IGraphQLService impl.
+        let (query, operation_name, variables) = (
+            mem::ManuallyDrop::new(query),
+            mem::ManuallyDrop::new(operation_name),
+            mem::ManuallyDrop::new(variables),
+        );
         let (Ok(query), Ok(operation_name), Ok(variables)) = (
             String::from_utf16(query.as_wide()),
             String::from_utf16(operation_name.as_wide()),
